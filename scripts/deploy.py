@@ -17,99 +17,124 @@ class SnowflakeDeployer:
             
         # Use folder name as app name
         self.app_name = self.app_dir.name
-        self.stage_name = f"{self.app_name}_stage"
-        self.warehouse_name = "compute_wh"
         self.database_name = "streamlit_db"
         self.schema_name = "public"
+        self.stage_name = f"{self.database_name}.{self.schema_name}.{self.app_name}_stage"
 
-    def execute_sql(self, sql, error_msg):
+    def execute_sql(self, sql):
         """Execute SQL command with error handling"""
         try:
             self.cursor.execute(sql)
             return True
         except Exception as e:
-            print(f"{error_msg}: {str(e)}")
+            print(f"Error executing SQL: {str(e)}")
             return False
 
     def setup_infrastructure(self):
-        """Set up all required Snowflake infrastructure"""
-        # Create warehouse
-        self.execute_sql(
-            f"CREATE WAREHOUSE IF NOT EXISTS {self.warehouse_name} WAREHOUSE_SIZE = 'X-SMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE",
-            "Error creating warehouse"
-        )
+        """Set up Snowflake infrastructure"""
+        print("\nSetting up Snowflake infrastructure...")
         
-        # Create database and schema
-        self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {self.database_name}", "Error creating database")
-        self.execute_sql(f"CREATE SCHEMA IF NOT EXISTS {self.database_name}.{self.schema_name}", "Error creating schema")
+        # Create warehouse if not exists
+        self.execute_sql(f"""
+            CREATE WAREHOUSE IF NOT EXISTS {os.getenv('SNOWFLAKE_WAREHOUSE')}
+            WITH WAREHOUSE_SIZE = 'XSMALL'
+            AUTO_SUSPEND = 60
+            AUTO_RESUME = TRUE
+        """)
         
-        # Create and configure stage
-        stage_name = f"{self.database_name}.{self.schema_name}.{self.stage_name}"
-        self.execute_sql(f"CREATE STAGE IF NOT EXISTS {stage_name}", "Error creating stage")
-        self.execute_sql(
-            f"GRANT READ, WRITE ON STAGE {stage_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}",
-            "Error granting privileges"
-        )
+        # Create database if not exists
+        self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {self.database_name}")
         
-        return stage_name
+        # Create schema if not exists
+        self.execute_sql(f"CREATE SCHEMA IF NOT EXISTS {self.database_name}.{self.schema_name}")
+        
+        # Create stage if not exists
+        self.execute_sql(f"""
+            CREATE STAGE IF NOT EXISTS {self.stage_name}
+            DIRECTORY = (ENABLE = TRUE)
+        """)
+        
+        # Grant privileges
+        self.execute_sql(f"GRANT USAGE ON WAREHOUSE {os.getenv('SNOWFLAKE_WAREHOUSE')} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
+        self.execute_sql(f"GRANT USAGE ON DATABASE {self.database_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
+        self.execute_sql(f"GRANT USAGE ON SCHEMA {self.database_name}.{self.schema_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
+        self.execute_sql(f"GRANT ALL ON STAGE {self.stage_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
 
-    def upload_files(self, stage_name):
-        """Upload and verify application files"""
-        # Clean stage
-        self.execute_sql(f"REMOVE @{stage_name}", "Error cleaning stage")
+    def upload_files(self):
+        """Upload files to Snowflake stage"""
+        print("\nUploading files to Snowflake stage...")
         
-        # Find all files in the app directory
+        # Clean stage
+        self.execute_sql(f"REMOVE @{self.stage_name}")
+        
+        # Get all Python files and environment.yml in the app directory and its subdirectories
         files_to_upload = []
         for file_path in self.app_dir.rglob("*"):
-            if file_path.is_file():
+            if file_path.is_file() and (file_path.suffix == '.py' or file_path.name == 'environment.yml'):
                 files_to_upload.append(file_path)
         
         if not files_to_upload:
-            raise Exception(f"No files found in {self.app_dir}")
-        
-        # Upload files
+            print("No Python files or environment.yml found in the app directory!")
+            return False
+            
+        # Upload each file
         for file_path in files_to_upload:
             relative_path = file_path.relative_to(self.app_dir)
-            print(f"Uploading {relative_path}")
-            # Use PUT command with the correct path structure
-            self.execute_sql(
-                f"PUT file://{file_path} @{stage_name}/{relative_path.parent} AUTO_COMPRESS = FALSE OVERWRITE = TRUE",
-                f"Error uploading {relative_path}"
-            )
+            print(f"Uploading {relative_path}...")
+            self.execute_sql(f"PUT file://{file_path} @{self.stage_name}/{relative_path.parent} AUTO_COMPRESS=FALSE OVERWRITE=TRUE")
+            
+        return True
 
-        # Verify uploads
-        self.cursor.execute(f"LIST @{stage_name}")
+    def verify_uploads(self):
+        """Verify that files were uploaded correctly"""
+        print("\nVerifying file uploads...")
+        self.cursor.execute(f"LIST @{self.stage_name}")
         files = self.cursor.fetchall()
-        if not files:
-            raise Exception("No files found in stage")
         
+        if not files:
+            print("No files found in stage!")
+            return False
+            
         print("\nUploaded files:")
         for file in files:
-            print(f"  {file[0]}")
+            print(f"- {file[0]}")
+            
+        return True
 
-    def create_app(self, stage_name):
-        """Create Streamlit application"""
-        app_path = f"{self.database_name}.{self.schema_name}.{self.app_name}"
-        self.execute_sql(
-            f"""
-            CREATE OR REPLACE STREAMLIT {app_path}
-            ROOT_LOCATION = '@{stage_name}'
-            MAIN_FILE = 'streamlit_app.py'
-            QUERY_WAREHOUSE = {self.warehouse_name}
-            """,
-            "Error creating application"
-        )
+    def create_streamlit_app(self):
+        """Create the Streamlit app"""
+        print("\nCreating Streamlit app...")
         
-        # Get app URL
-        account = os.getenv('SNOWFLAKE_ACCOUNT')
-        url = f"https://{account}.snowflakecomputing.com/streamlit/{self.database_name}/{self.schema_name}/{self.app_name}"
-        print(f"\nYour Streamlit app is available at: {url}")
+        # Get the main app file path
+        main_app_path = self.app_dir / "streamlit_app.py"
+        if not main_app_path.exists():
+            print("Main app file not found!")
+            return False
+            
+        # Create the Streamlit app
+        app_path = f"{self.database_name}.{self.schema_name}.{self.app_name}"
+        
+        self.execute_sql(f"""
+            CREATE OR REPLACE STREAMLIT {app_path}
+            ROOT_LOCATION = '@{self.stage_name}'
+            MAIN_FILE = 'streamlit_app.py'
+            QUERY_WAREHOUSE = {os.getenv('SNOWFLAKE_WAREHOUSE')}
+        """)
+        
+        # Get the app URL
+        self.cursor.execute(f"SHOW STREAMLITS LIKE '{self.app_name}'")
+        app_info = self.cursor.fetchone()
+        if app_info:
+            print(f"\nStreamlit app created successfully!")
+            print(f"App URL: {app_info[2]}")
+            return True
+            
+        return False
 
     def deploy(self):
-        """Execute the complete deployment process"""
+        """Deploy the Streamlit app"""
         try:
-            print("Starting deployment...")
-            print(f"Deploying Streamlit app: {self.app_name}")
+            print(f"Starting deployment of {self.app_name}...")
             
             # Connect to Snowflake
             self.conn = snowflake.connector.connect(
@@ -125,17 +150,14 @@ class SnowflakeDeployer:
             print("Connected to Snowflake")
             
             # Deploy
-            stage_name = self.setup_infrastructure()
-            self.upload_files(stage_name)
-            self.create_app(stage_name)
+            self.setup_infrastructure()
             
-            print("Deployment completed successfully!")
+            if self.upload_files() and self.verify_uploads():
+                self.create_streamlit_app()
             
         except Exception as e:
-            print(f"Deployment failed: {str(e)}")
+            print(f"Error during deployment: {str(e)}")
         finally:
-            if self.cursor:
-                self.cursor.close()
             if self.conn:
                 self.conn.close()
             print("Cleanup completed")
