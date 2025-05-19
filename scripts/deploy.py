@@ -11,16 +11,16 @@ class SnowflakeDeployer:
     def __init__(self, app_path):
         self.conn = None
         self.cursor = None
-        self.app_name = "snowflake_data_explorer"
+        self.app_dir = Path(app_path)
+        if not self.app_dir.exists():
+            raise ValueError(f"Streamlit app directory not found: {app_path}")
+            
+        # Use folder name as app name
+        self.app_name = self.app_dir.name
         self.stage_name = f"{self.app_name}_stage"
         self.warehouse_name = "compute_wh"
         self.database_name = "streamlit_db"
         self.schema_name = "public"
-        
-        # Set up paths
-        self.app_dir = Path(app_path)
-        if not self.app_dir.exists():
-            raise ValueError(f"Streamlit app directory not found: {app_path}")
 
     def execute_sql(self, sql, error_msg):
         """Execute SQL command with error handling"""
@@ -71,8 +71,9 @@ class SnowflakeDeployer:
         for file_path in files_to_upload:
             relative_path = file_path.relative_to(self.app_dir)
             print(f"Uploading {relative_path}")
+            # Use PUT command with the correct path structure
             self.execute_sql(
-                f"PUT file://{file_path} @{stage_name} AUTO_COMPRESS = FALSE OVERWRITE = TRUE",
+                f"PUT file://{file_path} @{stage_name}/{relative_path.parent} AUTO_COMPRESS = FALSE OVERWRITE = TRUE",
                 f"Error uploading {relative_path}"
             )
 
@@ -108,6 +109,7 @@ class SnowflakeDeployer:
         """Execute the complete deployment process"""
         try:
             print("Starting deployment...")
+            print(f"Deploying Streamlit app: {self.app_name}")
             
             # Connect to Snowflake
             self.conn = snowflake.connector.connect(
