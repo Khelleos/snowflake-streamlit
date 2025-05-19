@@ -1,0 +1,9 @@
+version: 1
+streamlit:
+  app:
+    name: "Snowflake Data Explorer"
+    main_file: "streamlit_app.py"
+    query_warehouse: "COMPUTE_WH"
+    stage: "@STREAMLIT_DB.PUBLIC.STREAMLIT_STAGE"
+    title: "Snowflake Data Explorer"
+    description: "A Streamlit application for exploring Snowflake data" 
