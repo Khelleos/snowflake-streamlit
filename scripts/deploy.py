@@ -3,6 +3,8 @@ import sys
 import snowflake.connector
 from dotenv import load_dotenv
 from pathlib import Path
+import yaml
+import time
 
 # Load environment variables
 load_dotenv()
@@ -20,15 +22,59 @@ class SnowflakeDeployer:
         self.database_name = "streamlit_db"
         self.schema_name = "public"
         self.stage_name = f"{self.database_name}.{self.schema_name}.{self.app_name}_stage"
+        
+        # Validate environment variables
+        self._validate_env_vars()
+        
+    def _validate_env_vars(self):
+        """Validate required environment variables"""
+        required_vars = [
+            'SNOWFLAKE_ACCOUNT',
+            'SNOWFLAKE_USER',
+            'SNOWFLAKE_PASSWORD',
+            'SNOWFLAKE_WAREHOUSE',
+            'SNOWFLAKE_DATABASE',
+            'SNOWFLAKE_SCHEMA',
+            'SNOWFLAKE_ROLE'
+        ]
+        
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-    def execute_sql(self, sql):
-        """Execute SQL command with error handling"""
+    def _validate_app_structure(self):
+        """Validate the Streamlit app structure"""
+        # Check for main app file
+        main_app = self.app_dir / "streamlit_app.py"
+        if not main_app.exists():
+            raise ValueError("Main app file (streamlit_app.py) not found")
+            
+        # Check for environment.yml
+        env_file = self.app_dir / "environment.yml"
+        if not env_file.exists():
+            raise ValueError("environment.yml not found")
+            
+        # Validate environment.yml format
         try:
-            self.cursor.execute(sql)
-            return True
-        except Exception as e:
-            print(f"Error executing SQL: {str(e)}")
-            return False
+            with open(env_file, 'r') as f:
+                yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid environment.yml format: {str(e)}")
+
+    def execute_sql(self, sql, retries=3, delay=1):
+        """Execute SQL command with retry logic"""
+        for attempt in range(retries):
+            try:
+                self.cursor.execute(sql)
+                return True
+            except snowflake.connector.errors.ProgrammingError as e:
+                if attempt == retries - 1:
+                    print(f"Error executing SQL: {str(e)}")
+                    return False
+                time.sleep(delay)
+            except Exception as e:
+                print(f"Error executing SQL: {str(e)}")
+                return False
 
     def setup_infrastructure(self):
         """Set up Snowflake infrastructure"""
@@ -99,6 +145,15 @@ class SnowflakeDeployer:
         for file in files:
             print(f"- {file[0]}")
             
+        # Verify all required files are present
+        required_files = ['streamlit_app.py', 'environment.yml']
+        uploaded_files = [f[0].split('/')[-1] for f in files]
+        missing_files = [f for f in required_files if f not in uploaded_files]
+        
+        if missing_files:
+            print(f"Missing required files: {', '.join(missing_files)}")
+            return False
+            
         return True
 
     def create_streamlit_app(self):
@@ -136,6 +191,9 @@ class SnowflakeDeployer:
         try:
             print(f"Starting deployment of {self.app_name}...")
             
+            # Validate app structure
+            self._validate_app_structure()
+            
             # Connect to Snowflake
             self.conn = snowflake.connector.connect(
                 account=os.getenv('SNOWFLAKE_ACCOUNT'),
@@ -157,10 +215,12 @@ class SnowflakeDeployer:
             
         except Exception as e:
             print(f"Error during deployment: {str(e)}")
+            return False
         finally:
             if self.conn:
                 self.conn.close()
             print("Cleanup completed")
+        return True
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -168,4 +228,6 @@ if __name__ == "__main__":
         sys.exit(1)
         
     app_path = sys.argv[1]
-    SnowflakeDeployer(app_path).deploy() 
+    deployer = SnowflakeDeployer(app_path)
+    success = deployer.deploy()
+    sys.exit(0 if success else 1) 
