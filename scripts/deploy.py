@@ -8,7 +8,7 @@ from pathlib import Path
 load_dotenv()
 
 class SnowflakeDeployer:
-    def __init__(self):
+    def __init__(self, app_path):
         self.conn = None
         self.cursor = None
         self.app_name = "snowflake_data_explorer"
@@ -18,9 +18,9 @@ class SnowflakeDeployer:
         self.schema_name = "public"
         
         # Set up paths
-        self.root_dir = Path(__file__).parent.parent
-        self.app_dir = self.root_dir / "streamlit_app"
-        self.scripts_dir = self.root_dir / "scripts"
+        self.app_dir = Path(app_path)
+        if not self.app_dir.exists():
+            raise ValueError(f"Streamlit app directory not found: {app_path}")
 
     def execute_sql(self, sql, error_msg):
         """Execute SQL command with error handling"""
@@ -58,18 +58,23 @@ class SnowflakeDeployer:
         # Clean stage
         self.execute_sql(f"REMOVE @{stage_name}", "Error cleaning stage")
         
+        # Find all files in the app directory
+        files_to_upload = []
+        for file_path in self.app_dir.rglob("*"):
+            if file_path.is_file():
+                files_to_upload.append(file_path)
+        
+        if not files_to_upload:
+            raise Exception(f"No files found in {self.app_dir}")
+        
         # Upload files
-        files_to_upload = ['streamlit_app.py', 'environment.yml']
-        for file in files_to_upload:
-            src_file = self.app_dir / file
-            if src_file.exists():
-                print(f"Uploading {src_file}")
-                self.execute_sql(
-                    f"PUT file://{src_file} @{stage_name} AUTO_COMPRESS = FALSE OVERWRITE = TRUE",
-                    f"Error uploading {file}"
-                )
-            else:
-                print(f"Warning: {file} not found")
+        for file_path in files_to_upload:
+            relative_path = file_path.relative_to(self.app_dir)
+            print(f"Uploading {relative_path}")
+            self.execute_sql(
+                f"PUT file://{file_path} @{stage_name} AUTO_COMPRESS = FALSE OVERWRITE = TRUE",
+                f"Error uploading {relative_path}"
+            )
 
         # Verify uploads
         self.cursor.execute(f"LIST @{stage_name}")
@@ -134,4 +139,9 @@ class SnowflakeDeployer:
             print("Cleanup completed")
 
 if __name__ == "__main__":
-    SnowflakeDeployer().deploy() 
+    if len(sys.argv) < 2:
+        print("Usage: python deploy.py <path_to_streamlit_app>")
+        sys.exit(1)
+        
+    app_path = sys.argv[1]
+    SnowflakeDeployer(app_path).deploy() 
