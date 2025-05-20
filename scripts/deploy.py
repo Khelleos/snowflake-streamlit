@@ -19,8 +19,8 @@ class SnowflakeDeployer:
             
         # Use folder name as app name
         self.app_name = self.app_dir.name
-        self.database_name = "streamlit_db"
-        self.schema_name = "public"
+        self.database_name = os.getenv('SNOWFLAKE_DATABASE')
+        self.schema_name = os.getenv('SNOWFLAKE_SCHEMA')
         self.stage_name = f"{self.database_name}.{self.schema_name}.{self.app_name}_stage"
         
         # Validate environment variables
@@ -76,23 +76,9 @@ class SnowflakeDeployer:
                 print(f"Error executing SQL: {str(e)}")
                 return False
 
-    def setup_infrastructure(self):
-        """Set up Snowflake infrastructure"""
-        print("\nSetting up Snowflake infrastructure...")
-        
-        # Create warehouse if not exists
-        self.execute_sql(f"""
-            CREATE WAREHOUSE IF NOT EXISTS {os.getenv('SNOWFLAKE_WAREHOUSE')}
-            WITH WAREHOUSE_SIZE = 'XSMALL'
-            AUTO_SUSPEND = 60
-            AUTO_RESUME = TRUE
-        """)
-        
-        # Create database if not exists
-        self.execute_sql(f"CREATE DATABASE IF NOT EXISTS {self.database_name}")
-        
-        # Create schema if not exists
-        self.execute_sql(f"CREATE SCHEMA IF NOT EXISTS {self.database_name}.{self.schema_name}")
+    def setup_stage(self):
+        """Set up stage for the app"""
+        print("\nSetting up stage...")
         
         # Create stage if not exists
         self.execute_sql(f"""
@@ -101,9 +87,6 @@ class SnowflakeDeployer:
         """)
         
         # Grant privileges
-        self.execute_sql(f"GRANT USAGE ON WAREHOUSE {os.getenv('SNOWFLAKE_WAREHOUSE')} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
-        self.execute_sql(f"GRANT USAGE ON DATABASE {self.database_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
-        self.execute_sql(f"GRANT USAGE ON SCHEMA {self.database_name}.{self.schema_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
         self.execute_sql(f"GRANT ALL ON STAGE {self.stage_name} TO ROLE {os.getenv('SNOWFLAKE_ROLE')}")
 
     def upload_files(self):
@@ -169,12 +152,44 @@ class SnowflakeDeployer:
         # Create the Streamlit app
         app_path = f"{self.database_name}.{self.schema_name}.{self.app_name}"
         
+        # Get allowed roles from environment
+        allowed_roles = os.getenv('ALLOWED_ROLES', '').split(',')
+        roles_str = ','.join(role.strip() for role in allowed_roles if role.strip())
+        
+        # First verify all roles exist
+        if roles_str:
+            print("\nVerifying roles...")
+            for role in allowed_roles:
+                role = role.strip()
+                if role:
+                    self.cursor.execute(f"SHOW ROLES LIKE '{role}'")
+                    if not self.cursor.fetchone():
+                        print(f"Error: Role '{role}' does not exist")
+                        return False
+        
+        # Create app with role information in comment
         self.execute_sql(f"""
             CREATE OR REPLACE STREAMLIT {app_path}
             ROOT_LOCATION = '@{self.stage_name}'
             MAIN_FILE = 'streamlit_app.py'
             QUERY_WAREHOUSE = {os.getenv('SNOWFLAKE_WAREHOUSE')}
+            COMMENT = 'Allowed roles: {roles_str}'
         """)
+        
+        # Grant access to specified roles
+        if roles_str:
+            try:
+                for role in allowed_roles:
+                    role = role.strip()
+                    if role:
+                        self.execute_sql(f"GRANT USAGE ON STREAMLIT {app_path} TO ROLE {role}")
+                        print(f"Granted access to role: {role}")
+            except Exception as e:
+                print(f"Error granting roles: {str(e)}")
+                # Rollback: Drop the Streamlit app if role assignment fails
+                print("Rolling back: Removing Streamlit app...")
+                self.execute_sql(f"DROP STREAMLIT IF EXISTS {app_path}")
+                return False
         
         # Get the app URL
         self.cursor.execute(f"SHOW STREAMLITS LIKE '{self.app_name}'")
@@ -208,7 +223,7 @@ class SnowflakeDeployer:
             print("Connected to Snowflake")
             
             # Deploy
-            self.setup_infrastructure()
+            self.setup_stage()
             
             if self.upload_files() and self.verify_uploads():
                 self.create_streamlit_app()
